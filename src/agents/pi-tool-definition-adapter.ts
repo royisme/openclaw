@@ -15,10 +15,15 @@ type AnyAgentTool = AgentTool<any, unknown>;
 function describeToolExecutionError(err: unknown): {
   message: string;
   stack?: string;
+  details?: string;
 } {
   if (err instanceof Error) {
     const message = err.message?.trim() ? err.message : String(err);
-    return { message, stack: err.stack };
+    const details =
+      err && typeof err === "object" && "details" in err
+        ? JSON.stringify((err as { details?: unknown }).details)
+        : undefined;
+    return { message, stack: err.stack, details };
   }
   return { message: String(err) };
 }
@@ -54,6 +59,11 @@ export function toToolDefinitions(tools: AnyAgentTool[]): ToolDefinition[] {
           const described = describeToolExecutionError(err);
           if (described.stack && described.stack !== described.message) {
             logDebug(`tools: ${normalizedName} failed stack:\n${described.stack}`);
+          }
+          if (described.details) {
+            logDebug(
+              `tools: ${normalizedName} failed details: ${described.details.slice(0, 2000)}`,
+            );
           }
           logError(`[tools] ${normalizedName} failed: ${described.message}`);
           return jsonResult({

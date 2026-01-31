@@ -43,6 +43,15 @@ const GOOGLE_SCHEMA_UNSUPPORTED_KEYWORDS = new Set([
   "maxProperties",
 ]);
 const ANTIGRAVITY_SIGNATURE_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+const GOOGLE_INVALID_CONTENT_KEYS = new Set([
+  "safetySettings",
+  "model",
+  "userAgent",
+  "requestType",
+  "requestId",
+  "sessionId",
+]);
+const GOOGLE_ALLOWED_PART_TYPES = new Set(["text", "image", "toolCall", "thinking"]);
 
 function isValidAntigravitySignature(value: unknown): value is string {
   if (typeof value !== "string") return false;
@@ -110,6 +119,73 @@ function sanitizeAntigravityThinkingBlocks(messages: AgentMessage[]): AgentMessa
     out.push(contentChanged ? { ...assistant, content: nextContent } : msg);
   }
   return touched ? out : messages;
+}
+
+function findInvalidGoogleContentBlocks(messages: AgentMessage[]): Array<{
+  messageIndex: number;
+  role: string;
+  partIndex?: number;
+  reason: string;
+  keys?: string[];
+}> {
+  const findings: Array<{
+    messageIndex: number;
+    role: string;
+    partIndex?: number;
+    reason: string;
+    keys?: string[];
+  }> = [];
+  for (let i = 0; i < messages.length; i += 1) {
+    const msg = messages[i] as { role?: unknown; content?: unknown } | undefined;
+    if (!msg || typeof msg !== "object") continue;
+    const role = typeof msg.role === "string" ? msg.role : "unknown";
+    const content = msg.content;
+    if (typeof content === "string") continue;
+    if (!Array.isArray(content)) {
+      findings.push({
+        messageIndex: i,
+        role,
+        reason: "content is non-array object",
+        keys: content && typeof content === "object" ? Object.keys(content as object) : undefined,
+      });
+      continue;
+    }
+    for (let p = 0; p < content.length; p += 1) {
+      const part = content[p] as Record<string, unknown> | undefined;
+      if (!part || typeof part !== "object") {
+        findings.push({
+          messageIndex: i,
+          role,
+          partIndex: p,
+          reason: "part is not an object",
+        });
+        continue;
+      }
+      const type = typeof part.type === "string" ? part.type : undefined;
+      const keys = Object.keys(part);
+      if (type && !GOOGLE_ALLOWED_PART_TYPES.has(type)) {
+        findings.push({
+          messageIndex: i,
+          role,
+          partIndex: p,
+          reason: `unsupported part type: ${type}`,
+          keys,
+        });
+        continue;
+      }
+      const invalidKeys = keys.filter((key) => GOOGLE_INVALID_CONTENT_KEYS.has(key));
+      if (invalidKeys.length > 0) {
+        findings.push({
+          messageIndex: i,
+          role,
+          partIndex: p,
+          reason: "contains invalid google request keys",
+          keys: invalidKeys,
+        });
+      }
+    }
+  }
+  return findings;
 }
 
 function findUnsupportedSchemaKeywords(schema: unknown, path: string): string[] {
@@ -364,6 +440,20 @@ export async function sanitizeSessionHistory(params: {
 
   if (!policy.applyGoogleTurnOrdering) {
     return sanitizedOpenAI;
+  }
+
+  if (isGoogleModelApi(params.modelApi)) {
+    const invalidBlocks = findInvalidGoogleContentBlocks(sanitizedOpenAI);
+    if (invalidBlocks.length > 0) {
+      log.warn("google history contains invalid content blocks", {
+        sessionId: params.sessionId,
+        provider: params.provider,
+        modelApi: params.modelApi,
+        modelId: params.modelId,
+        sample: invalidBlocks.slice(0, 8),
+        count: invalidBlocks.length,
+      });
+    }
   }
 
   return applyGoogleTurnOrderingFix({
